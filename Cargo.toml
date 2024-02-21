@@ -1,0 +1,25 @@
+[package]
+name = "local-type-alias"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["extra-traits", "full"] }
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+missing_inline_in_public_items = "warn"
+module_name_repetitions = "allow"
+redundant_else = "allow"
+redundant_pub_crate = "allow"
+use_self = "allow"
+
+[workspace]
+members = ["tests"]
