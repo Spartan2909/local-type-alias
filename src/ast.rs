@@ -47,10 +47,10 @@ impl Parse for Options {
         for setting in settings {
             match setting.name.to_string().as_str() {
                 "macros" => {
-                    if let Lit::Bool(b) = setting.value {
-                        options.in_macros = b.value;
+                    if let Some(value) = setting.value {
+                        return Err(syn::Error::new_spanned(value.value, "unexpected value"));
                     } else {
-                        return Err(syn::Error::new_spanned(setting.value, "expected a bool"));
+                        options.in_macros = true;
                     }
                 }
                 _ => return Err(syn::Error::new_spanned(setting.name, "unexpected option")),
@@ -63,14 +63,31 @@ impl Parse for Options {
 #[derive(Debug)]
 pub struct Setting {
     name: Ident,
-    _eq_token: Token![=],
-    value: Lit,
+    value: Option<SettingAssignment>,
 }
 
 impl Parse for Setting {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        Ok(Setting {
-            name: input.parse()?,
+        let name = input.parse()?;
+        let value = if input.peek(Token![=]) {
+            Some(input.parse()?)
+        } else {
+            None
+        };
+
+        Ok(Setting { name, value })
+    }
+}
+
+#[derive(Debug)]
+struct SettingAssignment {
+    _eq_token: Token![=],
+    value: Lit,
+}
+
+impl Parse for SettingAssignment {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        Ok(SettingAssignment {
             _eq_token: input.parse()?,
             value: input.parse()?,
         })

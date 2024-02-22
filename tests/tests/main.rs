@@ -11,7 +11,7 @@ macro_rules! identity {
 #[allow(dead_code)]
 struct Test;
 
-#[local_alias(macros = true)]
+#[local_alias(macros)]
 impl Test
 where
     alias!(X = i32):,

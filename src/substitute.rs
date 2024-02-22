@@ -142,20 +142,33 @@ fn into_token_tree(tokens: TokenStream) -> Result<TokenTree, TokenStream> {
     }
 }
 
-fn try_substitute_token_tree(token_tree: &TokenTree, context: SubstituteContext) -> Option<TokenStream> {
-    if let TokenTree::Group(group) = token_tree {
-        if group.delimiter() == Delimiter::Brace {
-            if let TokenTree::Group(group) = into_token_tree(group.stream()).ok()? {
-                if group.delimiter() == Delimiter::Brace {
-                    if let TokenTree::Ident(ident) = into_token_tree(group.stream()).ok()? {
-                        for (alias, ty) in context.aliases {
-                            if alias == &ident {
-                                return Some(ty.to_token_stream());
-                            }
-                        }
-                    }
-                }
-            }
+fn try_substitute_token_tree(
+    token_tree: &TokenTree,
+    context: SubstituteContext,
+) -> Option<TokenStream> {
+    let TokenTree::Group(group) = token_tree else {
+        return None;
+    };
+
+    if group.delimiter() != Delimiter::Brace {
+        return None;
+    }
+
+    let Ok(TokenTree::Group(group)) = into_token_tree(group.stream()) else {
+        return None;
+    };
+
+    if group.delimiter() != Delimiter::Brace {
+        return None;
+    }
+
+    let Ok(TokenTree::Ident(ident)) = into_token_tree(group.stream()) else {
+        return None;
+    };
+
+    for (alias, ty) in context.aliases {
+        if alias == &ident {
+            return Some(ty.to_token_stream());
         }
     }
 
