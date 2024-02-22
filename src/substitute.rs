@@ -176,19 +176,22 @@ fn try_substitute_token_tree(
 }
 
 fn substitute_token_tree(token_tree: TokenTree, context: SubstituteContext) -> TokenStream {
-    if let Some(stream) = try_substitute_token_tree(&token_tree, context) {
-        stream
-    } else if let TokenTree::Group(group) = token_tree {
-        let mut tokens = TokenStream::new();
-        for token_tree in group.stream() {
-            tokens.extend(substitute_token_tree(token_tree, context));
-        }
-        let mut new_group = Group::new(group.delimiter(), tokens);
-        new_group.set_span(group.span());
-        TokenTree::Group(new_group).into()
-    } else {
-        token_tree.into()
-    }
+    try_substitute_token_tree(&token_tree, context).map_or_else(
+        || {
+            if let TokenTree::Group(group) = token_tree {
+                let mut tokens = TokenStream::new();
+                for token_tree in group.stream() {
+                    tokens.extend(substitute_token_tree(token_tree, context));
+                }
+                let mut new_group = Group::new(group.delimiter(), tokens);
+                new_group.set_span(group.span());
+                TokenTree::Group(new_group).into()
+            } else {
+                token_tree.into()
+            }
+        },
+        |stream| stream,
+    )
 }
 
 impl Substitute for Macro {

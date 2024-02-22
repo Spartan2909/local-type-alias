@@ -49,9 +49,8 @@ impl Parse for Options {
                 "macros" => {
                     if let Some(value) = setting.value {
                         return Err(syn::Error::new_spanned(value.value, "unexpected value"));
-                    } else {
-                        options.in_macros = true;
                     }
+                    options.in_macros = true;
                 }
                 _ => return Err(syn::Error::new_spanned(setting.name, "unexpected option")),
             }
