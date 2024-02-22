@@ -132,66 +132,50 @@ impl Substitute for PredicateType {
     }
 }
 
-fn into_tree(tokens: TokenStream) -> Result<TokenTree, TokenStream> {
+fn into_token_tree(tokens: TokenStream) -> Result<TokenTree, TokenStream> {
     let mut iter = tokens.clone().into_iter();
-    let tree = iter.next().ok_or_else(TokenStream::new)?;
+    let token_tree = iter.next().ok_or_else(TokenStream::new)?;
     if iter.next().is_none() {
-        Ok(tree)
+        Ok(token_tree)
     } else {
         Err(tokens)
     }
 }
 
-fn into_braced_group(token_tree: TokenTree) -> Result<Group, TokenTree> {
+fn try_substitute_token_tree(token_tree: &TokenTree, context: SubstituteContext) -> Option<TokenStream> {
     if let TokenTree::Group(group) = token_tree {
         if group.delimiter() == Delimiter::Brace {
-            Ok(group)
-        } else {
-            Err(TokenTree::Group(group))
+            if let TokenTree::Group(group) = into_token_tree(group.stream()).ok()? {
+                if group.delimiter() == Delimiter::Brace {
+                    if let TokenTree::Ident(ident) = into_token_tree(group.stream()).ok()? {
+                        for (alias, ty) in context.aliases {
+                            if alias == &ident {
+                                return Some(ty.to_token_stream());
+                            }
+                        }
+                    }
+                }
+            }
         }
-    } else {
-        Err(token_tree)
     }
-}
 
-fn is_ident(tokens: TokenStream, ident: &Ident) -> bool {
-    let Ok(token_tree) = into_tree(tokens) else {
-        return false;
-    };
-
-    match token_tree {
-        TokenTree::Ident(inner_ident) => &inner_ident == ident,
-        _ => false,
-    }
+    None
 }
 
 fn substitute_token_tree(token_tree: TokenTree, context: SubstituteContext) -> TokenStream {
-    let mut tokens = TokenStream::new();
-
-    match into_braced_group(token_tree) {
-        Ok(group) => match into_tree(group.stream()) {
-            Ok(token_tree) => match into_braced_group(token_tree) {
-                Ok(group) => {
-                    let mut changed = false;
-                    for (alias, ty) in context.aliases {
-                        if is_ident(group.stream(), alias) {
-                            tokens.extend(ty.to_token_stream());
-                            changed = true;
-                            break;
-                        }
-                    }
-                    if !changed {
-                        tokens.extend(substitute_token_tree(TokenTree::Group(group), context));
-                    }
-                }
-                Err(_) => tokens.extend(substitute_token_tree(TokenTree::Group(group), context)),
-            },
-            Err(_) => tokens.extend(substitute_token_tree(TokenTree::Group(group), context)),
-        },
-        Err(token_tree) => tokens.extend(substitute_token_tree(token_tree, context)),
+    if let Some(stream) = try_substitute_token_tree(&token_tree, context) {
+        stream
+    } else if let TokenTree::Group(group) = token_tree {
+        let mut tokens = TokenStream::new();
+        for token_tree in group.stream() {
+            tokens.extend(substitute_token_tree(token_tree, context));
+        }
+        let mut new_group = Group::new(group.delimiter(), tokens);
+        new_group.set_span(group.span());
+        TokenTree::Group(new_group).into()
+    } else {
+        token_tree.into()
     }
-
-    tokens
 }
 
 impl Substitute for Macro {
