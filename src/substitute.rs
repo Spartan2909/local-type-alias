@@ -165,33 +165,41 @@ fn is_ident(tokens: TokenStream, ident: &Ident) -> bool {
     }
 }
 
+fn substitute_token_tree(token_tree: TokenTree, context: SubstituteContext) -> TokenStream {
+    let mut tokens = TokenStream::new();
+
+    match into_braced_group(token_tree) {
+        Ok(group) => match into_tree(group.stream()) {
+            Ok(token_tree) => match into_braced_group(token_tree) {
+                Ok(group) => {
+                    let mut changed = false;
+                    for (alias, ty) in context.aliases {
+                        if is_ident(group.stream(), alias) {
+                            tokens.extend(ty.to_token_stream());
+                            changed = true;
+                            break;
+                        }
+                    }
+                    if !changed {
+                        tokens.extend(substitute_token_tree(TokenTree::Group(group), context));
+                    }
+                }
+                Err(_) => tokens.extend(substitute_token_tree(TokenTree::Group(group), context)),
+            },
+            Err(_) => tokens.extend(substitute_token_tree(TokenTree::Group(group), context)),
+        },
+        Err(token_tree) => tokens.extend(substitute_token_tree(token_tree, context)),
+    }
+
+    tokens
+}
+
 impl Substitute for Macro {
     fn substitute(&mut self, context: SubstituteContext) {
         let mut new_tokens = TokenStream::new();
 
         for token_tree in mem::take(&mut self.tokens) {
-            match into_braced_group(token_tree) {
-                Ok(group) => match into_tree(group.stream()) {
-                    Ok(token_tree) => match into_braced_group(token_tree) {
-                        Ok(group) => {
-                            let mut changed = false;
-                            for (alias, ty) in context.aliases {
-                                if is_ident(group.stream(), alias) {
-                                    new_tokens.extend(ty.to_token_stream());
-                                    changed = true;
-                                    break;
-                                }
-                            }
-                            if !changed {
-                                new_tokens.extend([TokenTree::Group(group)]);
-                            }
-                        }
-                        Err(_) => new_tokens.extend([TokenTree::Group(group)]),
-                    },
-                    Err(_) => new_tokens.extend([TokenTree::Group(group)]),
-                },
-                Err(token_tree) => new_tokens.extend([token_tree]),
-            }
+            new_tokens.extend(substitute_token_tree(token_tree, context));
         }
 
         self.tokens = new_tokens;
