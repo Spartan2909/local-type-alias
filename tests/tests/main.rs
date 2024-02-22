@@ -2,14 +2,24 @@ use local_type_alias::local_alias;
 
 use std::ops::Add;
 
+macro_rules! identity {
+    ($($tt:tt)*) => {
+        $($tt)*
+    };
+}
+
 #[allow(dead_code)]
 struct Test;
 
-#[local_alias]
+#[local_alias(macros = true)]
 impl Test
 where
     alias!(X = i32):,
-    X: for<'a> Add<&'a i32>,
+    identity!({
+        {
+            X
+        }
+    }): for<'a> Add<&'a i32>,
 {
 }
 

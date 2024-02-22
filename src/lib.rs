@@ -38,6 +38,7 @@
 
 mod ast;
 use ast::AugmentedImpl;
+use ast::Options;
 
 mod substitute;
 
@@ -50,10 +51,11 @@ use syn::parse_macro_input;
 /// See the [crate documentation][crate] for details.
 #[proc_macro_attribute]
 pub fn local_alias(
-    _attr: proc_macro::TokenStream,
+    attr: proc_macro::TokenStream,
     item: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
+    let options = parse_macro_input!(attr as Options);
     let input = parse_macro_input!(item as AugmentedImpl);
-    let output = input.substitute();
+    let output = input.substitute(options.in_macros);
     output.into_token_stream().into()
 }

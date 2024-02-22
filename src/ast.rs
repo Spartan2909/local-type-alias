@@ -1,4 +1,5 @@
 use crate::substitute::Substitute;
+use crate::substitute::SubstituteContext;
 
 use std::iter;
 
@@ -6,6 +7,7 @@ use proc_macro2::Delimiter;
 use proc_macro2::TokenStream;
 
 use syn::braced;
+use syn::parenthesized;
 use syn::parse::Parse;
 use syn::parse::ParseStream;
 use syn::punctuated::Punctuated;
@@ -14,6 +16,7 @@ use syn::Attribute;
 use syn::GenericParam;
 use syn::Ident;
 use syn::ImplItem;
+use syn::Lit;
 use syn::Path;
 use syn::Token;
 use syn::Type;
@@ -23,6 +26,55 @@ use syn::WherePredicate;
 
 mod kw {
     syn::custom_keyword!(alias);
+}
+
+#[derive(Debug)]
+pub struct Options {
+    pub in_macros: bool,
+}
+
+#[allow(clippy::derivable_impls)]
+impl Default for Options {
+    fn default() -> Self {
+        Options { in_macros: false }
+    }
+}
+
+impl Parse for Options {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let settings: Punctuated<Setting, Token![,]> = Punctuated::parse_terminated(input)?;
+        let mut options = Options::default();
+        for setting in settings {
+            match setting.name.to_string().as_str() {
+                "macros" => {
+                    if let Lit::Bool(b) = setting.value {
+                        options.in_macros = b.value;
+                    } else {
+                        return Err(syn::Error::new_spanned(setting.value, "expected a bool"));
+                    }
+                }
+                _ => return Err(syn::Error::new_spanned(setting.name, "unexpected option")),
+            }
+        }
+        Ok(options)
+    }
+}
+
+#[derive(Debug)]
+pub struct Setting {
+    name: Ident,
+    _eq_token: Token![=],
+    value: Lit,
+}
+
+impl Parse for Setting {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        Ok(Setting {
+            name: input.parse()?,
+            _eq_token: input.parse()?,
+            value: input.parse()?,
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -39,7 +91,7 @@ pub struct AugmentedImpl {
 }
 
 impl AugmentedImpl {
-    pub fn substitute(mut self) -> syn::ItemImpl {
+    pub fn substitute(mut self, in_macros: bool) -> syn::ItemImpl {
         let Some(aliases) = self
             .generics
             .where_clause
@@ -52,11 +104,14 @@ impl AugmentedImpl {
         let mut substituted_aliases = Vec::with_capacity(aliases.len());
         for (index, (alias, ty)) in aliases.iter().enumerate() {
             let mut ty = ty.clone();
-            ty.substitute(&aliases[0..index]);
+            ty.substitute(SubstituteContext::new(&aliases[0..index], in_macros));
             substituted_aliases.push((alias.clone(), ty));
         }
 
-        Substitute::substitute(&mut self, &substituted_aliases);
+        Substitute::substitute(
+            &mut self,
+            SubstituteContext::new(&substituted_aliases, in_macros),
+        );
 
         self.into_item_impl_lossy()
     }
@@ -369,7 +424,7 @@ impl Parse for InlineTypeAlias {
         Ok(InlineTypeAlias {
             _alias_token: input.parse()?,
             _bang: input.parse()?,
-            paren: syn::parenthesized!(content in input),
+            paren: parenthesized!(content in input),
             ident: content.parse()?,
             _eq_token: content.parse()?,
             ty: content.parse()?,
