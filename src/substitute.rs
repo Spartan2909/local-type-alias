@@ -3,6 +3,8 @@ use crate::ast::AugmentedImpl;
 use crate::ast::AugmentedWhereClause;
 use crate::ast::AugmentedWherePredicate;
 
+use std::mem;
+
 use proc_macro2::Delimiter;
 use proc_macro2::Group;
 use proc_macro2::TokenStream;
@@ -10,9 +12,11 @@ use proc_macro2::TokenTree;
 use quote::ToTokens;
 use syn::AngleBracketedGenericArguments;
 use syn::AssocType;
+use syn::FnArg;
 use syn::GenericArgument;
 use syn::GenericParam;
 use syn::Ident;
+use syn::ImplItem;
 use syn::Macro;
 use syn::ParenthesizedGenericArguments;
 use syn::PathArguments;
@@ -22,7 +26,6 @@ use syn::Type;
 use syn::TypeArray;
 use syn::TypeBareFn;
 use syn::TypeGroup;
-use syn::TypeMacro;
 use syn::TypeParamBound;
 use syn::TypeParen;
 use syn::TypePtr;
@@ -49,6 +52,37 @@ pub trait Substitute {
 impl Substitute for AugmentedImpl {
     fn substitute(&mut self, context: SubstituteContext) {
         self.generics.substitute(context);
+
+        for item in &mut self.items {
+            item.substitute(context);
+        }
+    }
+}
+
+impl Substitute for ImplItem {
+    fn substitute(&mut self, context: SubstituteContext) {
+        match self {
+            ImplItem::Const(item) => item.ty.substitute(context),
+            ImplItem::Fn(item) => {
+                for input in &mut item.sig.inputs {
+                    if let FnArg::Typed(input) = input {
+                        input.ty.substitute(context);
+                    }
+                }
+
+                if let ReturnType::Type(_, ty) = &mut item.sig.output {
+                    ty.substitute(context);
+                }
+            }
+            ImplItem::Type(item) => item.ty.substitute(context),
+            ImplItem::Macro(item) => {
+                if context.in_macros {
+                    item.mac.substitute(context);
+                }
+            }
+            ImplItem::Verbatim(_) => {}
+            _ => panic!("unknown item {self:#?}"),
+        }
     }
 }
 
@@ -131,49 +165,37 @@ fn is_ident(tokens: TokenStream, ident: &Ident) -> bool {
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
-fn substitute_in_macro(ty: &mut Type, mac: Macro, context: SubstituteContext) {
-    let mut new_tokens = TokenStream::new();
+impl Substitute for Macro {
+    fn substitute(&mut self, context: SubstituteContext) {
+        let mut new_tokens = TokenStream::new();
 
-    for token_tree in mac.tokens {
-        match into_braced_group(token_tree) {
-            Ok(group) => match into_tree(group.stream()) {
-                Ok(token_tree) => match into_braced_group(token_tree) {
-                    Ok(group) => {
-                        let mut changed = false;
-                        for (alias, ty) in context.aliases {
-                            if is_ident(group.stream(), alias) {
-                                new_tokens.extend(ty.to_token_stream());
-                                changed = true;
-                                break;
+        for token_tree in mem::take(&mut self.tokens) {
+            match into_braced_group(token_tree) {
+                Ok(group) => match into_tree(group.stream()) {
+                    Ok(token_tree) => match into_braced_group(token_tree) {
+                        Ok(group) => {
+                            let mut changed = false;
+                            for (alias, ty) in context.aliases {
+                                if is_ident(group.stream(), alias) {
+                                    new_tokens.extend(ty.to_token_stream());
+                                    changed = true;
+                                    break;
+                                }
+                            }
+                            if !changed {
+                                new_tokens.extend([TokenTree::Group(group)]);
                             }
                         }
-                        if !changed {
-                            new_tokens.extend([TokenTree::Group(group)]);
-                        }
-                    }
+                        Err(_) => new_tokens.extend([TokenTree::Group(group)]),
+                    },
                     Err(_) => new_tokens.extend([TokenTree::Group(group)]),
                 },
-                Err(_) => new_tokens.extend([TokenTree::Group(group)]),
-            },
-            Err(token_tree) => new_tokens.extend([token_tree]),
+                Err(token_tree) => new_tokens.extend([token_tree]),
+            }
         }
-    }
 
-    let Macro {
-        path,
-        bang_token,
-        delimiter,
-        tokens: _,
-    } = mac;
-    *ty = Type::Macro(TypeMacro {
-        mac: Macro {
-            path,
-            bang_token,
-            delimiter,
-            tokens: new_tokens,
-        },
-    });
+        self.tokens = new_tokens;
+    }
 }
 
 impl Substitute for Type {
@@ -195,8 +217,7 @@ impl Substitute for Type {
                 }
             }
             Type::Macro(mac) if context.in_macros => {
-                let mac = mac.mac.clone();
-                substitute_in_macro(self, mac, context);
+                mac.mac.substitute(context);
             }
             Type::Path(path) => {
                 if let Some(qself) = &mut path.qself {
