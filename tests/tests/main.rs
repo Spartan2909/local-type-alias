@@ -20,4 +20,5 @@ where
     alias!(Y = *mut X):,
     alias!(Z = fn(X) -> Y):,
     Z: PartialEq<fn([u8; 4]) -> *mut [u8; 4]>,
-{}
+{
+}

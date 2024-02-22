@@ -4,7 +4,7 @@
 //! ## Examples
 //! ```rust
 //! # use local_type_alias::local_alias;
-//! # 
+//! #
 //! # use std::ops::Add;
 //! #
 //! # struct MyType<T>(T);
