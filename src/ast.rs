@@ -117,17 +117,7 @@ impl AugmentedImpl {
             return self.into_item_impl_lossy();
         };
 
-        let mut substituted_aliases = Vec::with_capacity(aliases.len());
-        for (index, (alias, ty)) in aliases.iter().enumerate() {
-            let mut ty = ty.clone();
-            ty.substitute(SubstituteContext::new(&aliases[0..index], in_macros));
-            substituted_aliases.push((alias.clone(), ty));
-        }
-
-        Substitute::substitute(
-            &mut self,
-            SubstituteContext::new(&substituted_aliases, in_macros),
-        );
+        Substitute::substitute(&mut self, SubstituteContext::new(&aliases, in_macros));
 
         self.into_item_impl_lossy()
     }
