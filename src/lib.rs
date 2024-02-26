@@ -56,6 +56,8 @@ pub fn local_alias(
 ) -> proc_macro::TokenStream {
     let options = parse_macro_input!(attr as Options);
     let input = parse_macro_input!(item as AugmentedImpl);
-    let output = input.substitute(options.in_macros);
-    output.into_token_stream().into()
+    match input.substitute(options.in_macros) {
+        Ok(result) => result.into_token_stream().into(),
+        Err(e) => e.to_compile_error().into(),
+    }
 }

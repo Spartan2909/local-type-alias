@@ -107,19 +107,19 @@ pub struct AugmentedImpl {
 }
 
 impl AugmentedImpl {
-    pub fn substitute(mut self, in_macros: bool) -> syn::ItemImpl {
+    pub fn substitute(mut self, in_macros: bool) -> syn::Result<syn::ItemImpl> {
         let Some(aliases) = self
             .generics
             .where_clause
             .as_ref()
             .map(AugmentedWhereClause::aliases)
         else {
-            return self.into_item_impl_lossy();
+            return Ok(self.into_item_impl_lossy());
         };
 
-        Substitute::substitute(&mut self, &mut SubstituteContext::new(&aliases, in_macros));
+        Substitute::substitute(&mut self, &mut SubstituteContext::new(&aliases, in_macros))?;
 
-        self.into_item_impl_lossy()
+        Ok(self.into_item_impl_lossy())
     }
 
     fn into_item_impl_lossy(self) -> syn::ItemImpl {

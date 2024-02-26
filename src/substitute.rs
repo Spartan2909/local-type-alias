@@ -52,89 +52,99 @@ impl<'a> SubstituteContext<'a> {
 }
 
 pub trait Substitute {
-    fn substitute(&mut self, context: &mut SubstituteContext);
+    fn substitute(&mut self, context: &mut SubstituteContext) -> syn::Result<()>;
 }
 
 impl Substitute for AugmentedImpl {
-    fn substitute(&mut self, context: &mut SubstituteContext) {
-        self.generics.substitute(context);
+    fn substitute(&mut self, context: &mut SubstituteContext) -> syn::Result<()> {
+        self.generics.substitute(context)?;
 
         for item in &mut self.items {
-            item.substitute(context);
+            item.substitute(context)?;
         }
+
+        Ok(())
     }
 }
 
 impl Substitute for ImplItem {
-    fn substitute(&mut self, context: &mut SubstituteContext) {
+    fn substitute(&mut self, context: &mut SubstituteContext) -> syn::Result<()> {
         match self {
-            ImplItem::Const(item) => item.ty.substitute(context),
+            ImplItem::Const(item) => item.ty.substitute(context)?,
             ImplItem::Fn(item) => {
                 for input in &mut item.sig.inputs {
                     if let FnArg::Typed(input) = input {
-                        input.ty.substitute(context);
+                        input.ty.substitute(context)?;
                     }
                 }
 
                 if let ReturnType::Type(_, ty) = &mut item.sig.output {
-                    ty.substitute(context);
+                    ty.substitute(context)?;
                 }
             }
-            ImplItem::Type(item) => item.ty.substitute(context),
+            ImplItem::Type(item) => item.ty.substitute(context)?,
             ImplItem::Macro(item) => {
                 if context.in_macros {
-                    item.mac.substitute(context);
+                    item.mac.substitute(context)?;
                 }
             }
             ImplItem::Verbatim(_) => {}
             _ => panic!("unknown item {self:#?}"),
         }
+
+        Ok(())
     }
 }
 
 impl Substitute for AugmentedGenerics {
-    fn substitute(&mut self, context: &mut SubstituteContext) {
+    fn substitute(&mut self, context: &mut SubstituteContext) -> syn::Result<()> {
         for param in &mut self.params {
             if let GenericParam::Type(param) = param {
                 if let Some(default) = &mut param.default {
-                    default.substitute(context);
+                    default.substitute(context)?;
                 }
             }
         }
 
         if let Some(where_clause) = &mut self.where_clause {
-            where_clause.substitute(context);
+            where_clause.substitute(context)?;
         }
+
+        Ok(())
     }
 }
 
 impl Substitute for AugmentedWhereClause {
-    fn substitute(&mut self, context: &mut SubstituteContext) {
+    fn substitute(&mut self, context: &mut SubstituteContext) -> syn::Result<()> {
         for predicate in &mut self.predicates {
-            predicate.substitute(context);
+            predicate.substitute(context)?;
         }
+        Ok(())
     }
 }
 
 impl Substitute for AugmentedWherePredicate {
-    fn substitute(&mut self, context: &mut SubstituteContext) {
+    fn substitute(&mut self, context: &mut SubstituteContext) -> syn::Result<()> {
         if let AugmentedWherePredicate::WherePredicate(WherePredicate::Type(pred)) = self {
-            pred.substitute(context);
+            pred.substitute(context)?;
         }
+        Ok(())
     }
 }
 
 impl Substitute for PredicateType {
-    fn substitute(&mut self, context: &mut SubstituteContext) {
-        self.bounded_ty.substitute(context);
+    fn substitute(&mut self, context: &mut SubstituteContext) -> syn::Result<()> {
+        self.bounded_ty.substitute(context)?;
 
         for bound in &mut self.bounds {
             if let TypeParamBound::Trait(bound) = bound {
                 for segment in &mut bound.path.segments {
-                    segment.arguments.substitute(context);
+                    segment.arguments.substitute(context)?;
                 }
             }
         }
+
+        Ok(())
     }
 }
 
@@ -201,7 +211,7 @@ fn substitute_token_tree(token_tree: TokenTree, context: &mut SubstituteContext)
 }
 
 impl Substitute for Macro {
-    fn substitute(&mut self, context: &mut SubstituteContext) {
+    fn substitute(&mut self, context: &mut SubstituteContext) -> syn::Result<()> {
         let mut new_tokens = TokenStream::new();
 
         for token_tree in mem::take(&mut self.tokens) {
@@ -209,6 +219,8 @@ impl Substitute for Macro {
         }
 
         self.tokens = new_tokens;
+
+        Ok(())
     }
 }
 
@@ -230,57 +242,63 @@ impl<'a> fmt::Debug for FormatSlice<'a> {
     }
 }
 
-fn detect_cycle(alias: &Ident, context: &mut SubstituteContext) {
-    assert!(
-        !context.substitution_stack.contains(&alias),
-        "cycle while substituting aliases\ncurrent alias: {alias}\nstack (most recent element last): {:#?}",
-        FormatSlice(&context.substitution_stack),
-    );
+fn detect_cycle(alias: &Ident, context: &mut SubstituteContext) -> syn::Result<()> {
+    if context.substitution_stack.contains(&alias) {
+        Err(syn::Error::new(
+            alias.span(),
+            "cycle while substituting aliases",
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 impl Substitute for Type {
-    fn substitute(&mut self, context: &mut SubstituteContext) {
+    fn substitute(&mut self, context: &mut SubstituteContext) -> syn::Result<()> {
         match self {
             Type::Array(TypeArray { elem, .. })
             | Type::Group(TypeGroup { elem, .. })
             | Type::Paren(TypeParen { elem, .. })
             | Type::Ptr(TypePtr { elem, .. })
             | Type::Reference(TypeReference { elem, .. })
-            | Type::Slice(TypeSlice { elem, .. }) => elem.substitute(context),
+            | Type::Slice(TypeSlice { elem, .. }) => elem.substitute(context)?,
             Type::BareFn(TypeBareFn { inputs, output, .. }) => {
                 for arg in inputs {
-                    arg.ty.substitute(context);
+                    arg.ty.substitute(context)?;
                 }
 
                 if let ReturnType::Type(_, ty) = output {
-                    ty.substitute(context);
+                    ty.substitute(context)?;
                 }
             }
             Type::Macro(mac) if context.in_macros => {
-                mac.mac.substitute(context);
+                mac.mac.substitute(context)?;
             }
             Type::Path(path) => {
                 if let Some(qself) = &mut path.qself {
-                    qself.ty.substitute(context);
+                    qself.ty.substitute(context)?;
                 } else if path.path.segments.len() == 1 {
                     for (alias, ty) in context.aliases {
                         if path.path.is_ident(alias) {
-                            detect_cycle(alias, context);
+                            detect_cycle(alias, context)?;
                             context.substitution_stack.push(alias);
                             let mut ty = ty.clone();
-                            ty.substitute(context);
+                            ty.substitute(context)?;
                             context.substitution_stack.pop();
                             *self = ty;
-                            return;
+                            return Ok(());
                         }
                     }
                 }
 
                 for segment in &mut path.path.segments {
-                    segment.arguments.substitute(context);
+                    segment.arguments.substitute(context)?;
                 }
             }
-            Type::Tuple(tuple) => tuple.elems.iter_mut().for_each(|ty| ty.substitute(context)),
+            Type::Tuple(tuple) => tuple
+                .elems
+                .iter_mut()
+                .try_for_each(|ty| ty.substitute(context))?,
             Type::ImplTrait(_)
             | Type::Infer(_)
             | Type::Macro(_)
@@ -289,17 +307,19 @@ impl Substitute for Type {
             | Type::Verbatim(_) => {}
             _ => panic!("unknown type format {self:#?}"),
         }
+
+        Ok(())
     }
 }
 
 impl Substitute for PathArguments {
-    fn substitute(&mut self, context: &mut SubstituteContext) {
+    fn substitute(&mut self, context: &mut SubstituteContext) -> syn::Result<()> {
         match self {
             PathArguments::AngleBracketed(AngleBracketedGenericArguments { args, .. }) => {
                 for arg in args {
                     match arg {
                         GenericArgument::AssocType(AssocType { ty, .. })
-                        | GenericArgument::Type(ty) => ty.substitute(context),
+                        | GenericArgument::Type(ty) => ty.substitute(context)?,
                         _ => {}
                     }
                 }
@@ -308,14 +328,16 @@ impl Substitute for PathArguments {
                 inputs, output, ..
             }) => {
                 for input in inputs {
-                    input.substitute(context);
+                    input.substitute(context)?;
                 }
 
                 if let ReturnType::Type(_, ty) = output {
-                    ty.substitute(context);
+                    ty.substitute(context)?;
                 }
             }
             PathArguments::None => {}
         }
+
+        Ok(())
     }
 }
