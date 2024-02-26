@@ -117,7 +117,7 @@ impl AugmentedImpl {
             return self.into_item_impl_lossy();
         };
 
-        Substitute::substitute(&mut self, SubstituteContext::new(&aliases, in_macros));
+        Substitute::substitute(&mut self, &mut SubstituteContext::new(&aliases, in_macros));
 
         self.into_item_impl_lossy()
     }

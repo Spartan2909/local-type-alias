@@ -3,6 +3,7 @@ use crate::ast::AugmentedImpl;
 use crate::ast::AugmentedWhereClause;
 use crate::ast::AugmentedWherePredicate;
 
+use std::fmt;
 use std::mem;
 
 use proc_macro2::Delimiter;
@@ -33,24 +34,29 @@ use syn::TypeReference;
 use syn::TypeSlice;
 use syn::WherePredicate;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub struct SubstituteContext<'a> {
     pub aliases: &'a [(Ident, Type)],
     pub in_macros: bool,
+    pub substitution_stack: Vec<&'a Ident>,
 }
 
 impl<'a> SubstituteContext<'a> {
     pub const fn new(aliases: &'a [(Ident, Type)], in_macros: bool) -> SubstituteContext<'a> {
-        SubstituteContext { aliases, in_macros }
+        SubstituteContext {
+            aliases,
+            in_macros,
+            substitution_stack: Vec::new(),
+        }
     }
 }
 
 pub trait Substitute {
-    fn substitute(&mut self, context: SubstituteContext);
+    fn substitute(&mut self, context: &mut SubstituteContext);
 }
 
 impl Substitute for AugmentedImpl {
-    fn substitute(&mut self, context: SubstituteContext) {
+    fn substitute(&mut self, context: &mut SubstituteContext) {
         self.generics.substitute(context);
 
         for item in &mut self.items {
@@ -60,7 +66,7 @@ impl Substitute for AugmentedImpl {
 }
 
 impl Substitute for ImplItem {
-    fn substitute(&mut self, context: SubstituteContext) {
+    fn substitute(&mut self, context: &mut SubstituteContext) {
         match self {
             ImplItem::Const(item) => item.ty.substitute(context),
             ImplItem::Fn(item) => {
@@ -87,7 +93,7 @@ impl Substitute for ImplItem {
 }
 
 impl Substitute for AugmentedGenerics {
-    fn substitute(&mut self, context: SubstituteContext) {
+    fn substitute(&mut self, context: &mut SubstituteContext) {
         for param in &mut self.params {
             if let GenericParam::Type(param) = param {
                 if let Some(default) = &mut param.default {
@@ -103,7 +109,7 @@ impl Substitute for AugmentedGenerics {
 }
 
 impl Substitute for AugmentedWhereClause {
-    fn substitute(&mut self, context: SubstituteContext) {
+    fn substitute(&mut self, context: &mut SubstituteContext) {
         for predicate in &mut self.predicates {
             predicate.substitute(context);
         }
@@ -111,7 +117,7 @@ impl Substitute for AugmentedWhereClause {
 }
 
 impl Substitute for AugmentedWherePredicate {
-    fn substitute(&mut self, context: SubstituteContext) {
+    fn substitute(&mut self, context: &mut SubstituteContext) {
         if let AugmentedWherePredicate::WherePredicate(WherePredicate::Type(pred)) = self {
             pred.substitute(context);
         }
@@ -119,7 +125,7 @@ impl Substitute for AugmentedWherePredicate {
 }
 
 impl Substitute for PredicateType {
-    fn substitute(&mut self, context: SubstituteContext) {
+    fn substitute(&mut self, context: &mut SubstituteContext) {
         self.bounded_ty.substitute(context);
 
         for bound in &mut self.bounds {
@@ -144,7 +150,7 @@ fn into_token_tree(tokens: TokenStream) -> Result<TokenTree, TokenStream> {
 
 fn try_substitute_token_tree(
     token_tree: &TokenTree,
-    context: SubstituteContext,
+    context: &mut SubstituteContext,
 ) -> Option<TokenStream> {
     let TokenTree::Group(group) = token_tree else {
         return None;
@@ -175,7 +181,7 @@ fn try_substitute_token_tree(
     None
 }
 
-fn substitute_token_tree(token_tree: TokenTree, context: SubstituteContext) -> TokenStream {
+fn substitute_token_tree(token_tree: TokenTree, context: &mut SubstituteContext) -> TokenStream {
     try_substitute_token_tree(&token_tree, context).map_or_else(
         || {
             if let TokenTree::Group(group) = token_tree {
@@ -195,7 +201,7 @@ fn substitute_token_tree(token_tree: TokenTree, context: SubstituteContext) -> T
 }
 
 impl Substitute for Macro {
-    fn substitute(&mut self, context: SubstituteContext) {
+    fn substitute(&mut self, context: &mut SubstituteContext) {
         let mut new_tokens = TokenStream::new();
 
         for token_tree in mem::take(&mut self.tokens) {
@@ -206,8 +212,34 @@ impl Substitute for Macro {
     }
 }
 
+struct FormatIdent<'a>(&'a Ident);
+
+impl<'a> fmt::Debug for FormatIdent<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+struct FormatSlice<'a>(&'a [&'a Ident]);
+
+impl<'a> fmt::Debug for FormatSlice<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list()
+            .entries(self.0.iter().copied().map(FormatIdent))
+            .finish()
+    }
+}
+
+fn detect_cycle(alias: &Ident, context: &mut SubstituteContext) {
+    assert!(
+        !context.substitution_stack.contains(&alias),
+        "cycle while substituting aliases\ncurrent alias: {alias}\nstack (most recent element last): {:#?}",
+        FormatSlice(&context.substitution_stack),
+    );
+}
+
 impl Substitute for Type {
-    fn substitute(&mut self, context: SubstituteContext) {
+    fn substitute(&mut self, context: &mut SubstituteContext) {
         match self {
             Type::Array(TypeArray { elem, .. })
             | Type::Group(TypeGroup { elem, .. })
@@ -233,8 +265,11 @@ impl Substitute for Type {
                 } else if path.path.segments.len() == 1 {
                     for (alias, ty) in context.aliases {
                         if path.path.is_ident(alias) {
+                            detect_cycle(alias, context);
+                            context.substitution_stack.push(alias);
                             let mut ty = ty.clone();
                             ty.substitute(context);
+                            context.substitution_stack.pop();
                             *self = ty;
                             return;
                         }
@@ -258,7 +293,7 @@ impl Substitute for Type {
 }
 
 impl Substitute for PathArguments {
-    fn substitute(&mut self, context: SubstituteContext) {
+    fn substitute(&mut self, context: &mut SubstituteContext) {
         match self {
             PathArguments::AngleBracketed(AngleBracketedGenericArguments { args, .. }) => {
                 for arg in args {
