@@ -7,15 +7,13 @@
 //! #
 //! # use std::ops::Add;
 //! #
-//! # struct MyType<T>(T);
-//! #
 //! #[local_alias]
-//! impl<T> MyType<T>
+//! #[alias(type X = i32)]
+//! struct MyType<T>
 //! where
-//!     alias!(X = i32):,
 //!     X: for<'a> Add<&'a T>,
 //! {
-//!     // ...
+//!     value: T,
 //! }
 //! ```
 //!
@@ -25,12 +23,15 @@
 //! # struct MyType<T>(T);
 //! #
 //! #[local_alias]
+//! #[alias(
+//!     type X = [u8; 4],
+//!     type Y = *mut X,
+//!     type Z = fn(X) -> Y,
+//!     trait A = PartialEq<fn([u8; 4]) -> *mut X>,
+//! )]
 //! impl<T> MyType<T>
 //! where
-//!     alias!(X = [u8; 4]):,
-//!     alias!(Y = *mut X):,
-//!     alias!(Z = fn(X) -> Y):,
-//!     Z: PartialEq<fn([u8; 4]) -> *mut [u8; 4]>,
+//!     Z: A,
 //! {
 //!     // ...
 //! }
