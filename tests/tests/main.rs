@@ -9,26 +9,29 @@ macro_rules! identity {
 }
 
 #[allow(dead_code)]
-struct Test;
+struct Test1;
 
 #[local_alias(macros)]
-impl Test
+#[alias(type X = i32)]
+impl Test1
 where
-    alias!(X = i32):,
     identity!({
         {
             X
         }
     }): for<'a> Add<&'a i32>,
+    for<'a> <X as Add<&'a X>>::Output: Eq,
 {
 }
 
-#[local_alias]
-impl Test
+#[local_alias(macros)]
+#[alias(
+    type X = [u8; 4],
+    type Y = *mut X,
+    type Z = fn(X) -> Y,
+    trait A = PartialEq<fn([u8; 4]) -> *mut X>,
+)]
+#[allow(dead_code)]
+struct Test2
 where
-    alias!(X = [u8; 4]):,
-    alias!(Y = *mut X):,
-    alias!(Z = fn(X) -> Y):,
-    Z: PartialEq<fn([u8; 4]) -> *mut [u8; 4]>,
-{
-}
+    Z: A;

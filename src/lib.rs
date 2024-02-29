@@ -36,28 +36,42 @@
 //! }
 //! ```
 
-mod ast;
-use ast::AugmentedImpl;
-use ast::Options;
-
 mod substitute;
 
 use quote::ToTokens as _;
 
 use syn::parse_macro_input;
+use syn::visit_mut::VisitMut as _;
+use syn::Item;
 
 /// Local type aliases.
 ///
 /// See the [crate documentation][crate] for details.
 #[proc_macro_attribute]
 pub fn local_alias(
-    attr: proc_macro::TokenStream,
+    args: proc_macro::TokenStream,
     item: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
-    let options = parse_macro_input!(attr as Options);
-    let input = parse_macro_input!(item as AugmentedImpl);
-    match input.substitute(options.in_macros) {
-        Ok(result) => result.into_token_stream().into(),
-        Err(e) => e.to_compile_error().into(),
-    }
+    let mut input = parse_macro_input!(item as Item);
+
+    let mut in_macros = false;
+    let options_parser = syn::meta::parser(|meta| {
+        if meta.path.is_ident("macros") {
+            in_macros = true;
+            Ok(())
+        } else {
+            Err(meta.error("unsupported local alias option"))
+        }
+    });
+
+    parse_macro_input!(args with options_parser);
+
+    let mut visitor = match substitute::Visitor::new(in_macros, &mut input) {
+        Ok(visitor) => visitor,
+        Err(error) => return error.into_compile_error().into(),
+    };
+
+    visitor.visit_item_mut(&mut input);
+
+    input.into_token_stream().into()
 }

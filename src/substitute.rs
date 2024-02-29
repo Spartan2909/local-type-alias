@@ -1,150 +1,316 @@
-use crate::ast::AugmentedGenerics;
-use crate::ast::AugmentedImpl;
-use crate::ast::AugmentedWhereClause;
-use crate::ast::AugmentedWherePredicate;
-
-use std::fmt;
+use std::collections::HashMap;
 use std::mem;
 
 use proc_macro2::Delimiter;
 use proc_macro2::Group;
+use proc_macro2::Span;
 use proc_macro2::TokenStream;
+
 use proc_macro2::TokenTree;
 use quote::ToTokens;
-use syn::AngleBracketedGenericArguments;
-use syn::AssocType;
-use syn::FnArg;
-use syn::GenericArgument;
-use syn::GenericParam;
-use syn::Ident;
-use syn::ImplItem;
-use syn::Macro;
-use syn::ParenthesizedGenericArguments;
-use syn::PathArguments;
-use syn::PredicateType;
-use syn::ReturnType;
-use syn::Type;
-use syn::TypeArray;
-use syn::TypeBareFn;
-use syn::TypeGroup;
-use syn::TypeParamBound;
-use syn::TypeParen;
-use syn::TypePtr;
-use syn::TypeReference;
-use syn::TypeSlice;
-use syn::WherePredicate;
 
-#[derive(Debug)]
-pub struct SubstituteContext<'a> {
-    pub aliases: &'a [(Ident, Type)],
-    pub in_macros: bool,
-    pub substitution_stack: Vec<&'a Ident>,
+use syn::parse::Parse;
+use syn::parse::ParseStream;
+use syn::parse::Parser as _;
+use syn::punctuated::Punctuated;
+use syn::visit_mut;
+use syn::visit_mut::VisitMut;
+use syn::Attribute;
+use syn::Generics;
+use syn::Ident;
+use syn::Item;
+use syn::ItemConst;
+use syn::ItemEnum;
+use syn::ItemExternCrate;
+use syn::ItemFn;
+use syn::ItemForeignMod;
+use syn::ItemImpl;
+use syn::ItemMacro;
+use syn::ItemMod;
+use syn::ItemStatic;
+use syn::ItemStruct;
+use syn::ItemTrait;
+use syn::ItemTraitAlias;
+use syn::ItemType;
+use syn::ItemUnion;
+use syn::ItemUse;
+use syn::Macro;
+use syn::Meta;
+use syn::Stmt;
+use syn::Token;
+use syn::Type;
+use syn::TypeParamBound;
+
+pub struct Visitor {
+    type_aliases: HashMap<Ident, Type>,
+    trait_aliases: HashMap<Ident, Punctuated<TypeParamBound, Token![+]>>,
+    in_macros: bool,
+    substitution_stack: Vec<Ident>,
+    error: Option<syn::Error>,
 }
 
-impl<'a> SubstituteContext<'a> {
-    pub const fn new(aliases: &'a [(Ident, Type)], in_macros: bool) -> SubstituteContext<'a> {
-        SubstituteContext {
-            aliases,
+fn attributes_mut(item: &mut Item) -> &mut Vec<Attribute> {
+    match item {
+        Item::Const(ItemConst { attrs, .. })
+        | Item::Enum(ItemEnum { attrs, .. })
+        | Item::ExternCrate(ItemExternCrate { attrs, .. })
+        | Item::Fn(ItemFn { attrs, .. })
+        | Item::ForeignMod(ItemForeignMod { attrs, .. })
+        | Item::Impl(ItemImpl { attrs, .. })
+        | Item::Macro(ItemMacro { attrs, .. })
+        | Item::Mod(ItemMod { attrs, .. })
+        | Item::Static(ItemStatic { attrs, .. })
+        | Item::Struct(ItemStruct { attrs, .. })
+        | Item::Trait(ItemTrait { attrs, .. })
+        | Item::TraitAlias(ItemTraitAlias { attrs, .. })
+        | Item::Type(ItemType { attrs, .. })
+        | Item::Union(ItemUnion { attrs, .. })
+        | Item::Use(ItemUse { attrs, .. }) => attrs,
+        _ => todo!(),
+    }
+}
+
+impl Visitor {
+    pub fn new(in_macros: bool, item: &mut Item) -> syn::Result<Visitor> {
+        let attributes = attributes_mut(item);
+        let mut to_remove = Vec::with_capacity(attributes.len());
+        let mut type_aliases = HashMap::new();
+        let mut trait_aliases = HashMap::new();
+
+        for (index, attribute) in attributes.iter_mut().enumerate() {
+            if let Meta::List(meta) = &mut attribute.meta {
+                if meta.path.is_ident("alias") {
+                    let new_aliases: Punctuated<InlineAlias, Token![,]> =
+                        Punctuated::parse_terminated.parse2(mem::take(&mut meta.tokens))?;
+                    for alias in new_aliases {
+                        match alias {
+                            InlineAlias::Type(alias) => {
+                                type_aliases.insert(alias.ident, alias.ty);
+                            }
+                            InlineAlias::Trait(alias) => {
+                                trait_aliases.insert(alias.ident, alias.bounds);
+                            }
+                        }
+                    }
+                    to_remove.push(index);
+                }
+            }
+        }
+
+        for &index in to_remove.iter().rev() {
+            attributes.remove(index);
+        }
+
+        Ok(Visitor {
+            type_aliases,
+            trait_aliases,
             in_macros,
             substitution_stack: Vec::new(),
+            error: None,
+        })
+    }
+
+    fn detect_cycle(&mut self, alias: &Ident) -> syn::Result<()> {
+        if self.substitution_stack.contains(alias) {
+            Err(syn::Error::new(
+                alias.span(),
+                "cycle while substituting aliases",
+            ))
+        } else {
+            Ok(())
         }
+    }
+
+    fn add_error(&mut self, error: syn::Error) {
+        if let Some(exisiting) = &mut self.error {
+            exisiting.combine(error);
+        } else {
+            self.error = Some(error);
+        }
+    }
+
+    fn try_substitute_token_tree(&mut self, token_tree: &TokenTree) -> Option<TokenStream> {
+        let TokenTree::Group(group) = token_tree else {
+            return None;
+        };
+
+        if group.delimiter() != Delimiter::Brace {
+            return None;
+        }
+
+        let Ok(TokenTree::Group(group)) = into_token_tree(group.stream()) else {
+            return None;
+        };
+
+        if group.delimiter() != Delimiter::Brace {
+            return None;
+        }
+
+        let Ok(TokenTree::Ident(ident)) = into_token_tree(group.stream()) else {
+            return None;
+        };
+
+        self.type_aliases
+            .get(&ident)
+            .map(ToTokens::to_token_stream)
+            .or_else(|| {
+                self.trait_aliases
+                    .get(&ident)
+                    .map(ToTokens::to_token_stream)
+            })
+    }
+
+    fn substitute_token_tree(&mut self, token_tree: TokenTree) -> TokenStream {
+        self.try_substitute_token_tree(&token_tree).map_or_else(
+            || {
+                if let TokenTree::Group(group) = token_tree {
+                    let mut tokens = TokenStream::new();
+                    for token_tree in group.stream() {
+                        tokens.extend(self.substitute_token_tree(token_tree));
+                    }
+                    let mut new_group = Group::new(group.delimiter(), tokens);
+                    new_group.set_span(group.span());
+                    TokenTree::Group(new_group).into()
+                } else {
+                    token_tree.into()
+                }
+            },
+            |stream| stream,
+        )
     }
 }
 
-pub trait Substitute {
-    fn substitute(&mut self, context: &mut SubstituteContext) -> syn::Result<()>;
-}
-
-impl Substitute for AugmentedImpl {
-    fn substitute(&mut self, context: &mut SubstituteContext) -> syn::Result<()> {
-        self.generics.substitute(context)?;
-
-        for item in &mut self.items {
-            item.substitute(context)?;
+impl VisitMut for Visitor {
+    fn visit_stmt_mut(&mut self, i: &mut Stmt) {
+        if !matches!(i, Stmt::Item(_)) {
+            visit_mut::visit_stmt_mut(self, i);
         }
-
-        Ok(())
     }
-}
 
-impl Substitute for ImplItem {
-    fn substitute(&mut self, context: &mut SubstituteContext) -> syn::Result<()> {
-        match self {
-            ImplItem::Const(item) => item.ty.substitute(context)?,
-            ImplItem::Fn(item) => {
-                for input in &mut item.sig.inputs {
-                    if let FnArg::Typed(input) = input {
-                        input.ty.substitute(context)?;
+    fn visit_type_mut(&mut self, i: &mut Type) {
+        if let Type::Path(path) = i {
+            if let Some(qself) = &mut path.qself {
+                self.visit_type_mut(&mut qself.ty);
+                if qself.as_token.is_some() && qself.position == 1 {
+                    if let Some(bounds) = self
+                        .trait_aliases
+                        .get(&path.path.segments.first().unwrap().ident)
+                    {
+                        if bounds.len() != 1 {
+                            self.add_error(syn::Error::new_spanned(
+                                bounds,
+                                "cannot use `+` in fully qualified paths",
+                            ));
+                            return;
+                        }
+
+                        let first_segment = path.path.segments.first().unwrap();
+                        if first_segment.arguments.is_empty() {
+                            self.add_error(syn::Error::new_spanned(
+                                &first_segment.arguments,
+                                "generic aliases are not supported",
+                            ));
+                            return;
+                        }
+
+                        let mut bounds = bounds.clone();
+
+                        let bound = bounds.first_mut().unwrap();
+                        let TypeParamBound::Trait(bound) = bound else {
+                            self.add_error(syn::Error::new_spanned(
+                                bound,
+                                "cannot use non-trait bounds in fully qualified paths",
+                            ));
+                            return;
+                        };
+
+                        bound
+                            .path
+                            .segments
+                            .extend(path.path.segments.iter().skip(1).cloned());
+
+                        path.path.segments = mem::take(&mut bound.path.segments);
                     }
                 }
-
-                if let ReturnType::Type(_, ty) = &mut item.sig.output {
-                    ty.substitute(context)?;
+            } else if path.path.segments.len() == 1 {
+                let alias = &path.path.segments.last().unwrap().ident;
+                if let Some(ty) = self.type_aliases.get(alias) {
+                    let mut ty = ty.clone();
+                    if let Err(error) = self.detect_cycle(alias) {
+                        self.add_error(error);
+                        return;
+                    }
+                    self.substitution_stack.push(alias.clone());
+                    self.visit_type_mut(&mut ty);
+                    self.substitution_stack.pop();
+                    *i = ty;
+                    return;
                 }
             }
-            ImplItem::Type(item) => item.ty.substitute(context)?,
-            ImplItem::Macro(item) => {
-                if context.in_macros {
-                    item.mac.substitute(context)?;
-                }
+
+            self.visit_path_mut(&mut path.path);
+        } else {
+            visit_mut::visit_type_mut(self, i);
+        }
+    }
+
+    fn visit_macro_mut(&mut self, i: &mut Macro) {
+        if self.in_macros {
+            let mut new_tokens = TokenStream::new();
+
+            for token_tree in mem::take(&mut i.tokens) {
+                new_tokens.extend(self.substitute_token_tree(token_tree));
             }
-            ImplItem::Verbatim(_) => {}
-            _ => panic!("unknown item {self:#?}"),
-        }
 
-        Ok(())
+            i.tokens = new_tokens;
+        }
     }
-}
 
-impl Substitute for AugmentedGenerics {
-    fn substitute(&mut self, context: &mut SubstituteContext) -> syn::Result<()> {
-        for param in &mut self.params {
-            if let GenericParam::Type(param) = param {
-                if let Some(default) = &mut param.default {
-                    default.substitute(context)?;
-                }
-            }
-        }
-
-        if let Some(where_clause) = &mut self.where_clause {
-            where_clause.substitute(context)?;
-        }
-
-        Ok(())
-    }
-}
-
-impl Substitute for AugmentedWhereClause {
-    fn substitute(&mut self, context: &mut SubstituteContext) -> syn::Result<()> {
-        for predicate in &mut self.predicates {
-            predicate.substitute(context)?;
-        }
-        Ok(())
-    }
-}
-
-impl Substitute for AugmentedWherePredicate {
-    fn substitute(&mut self, context: &mut SubstituteContext) -> syn::Result<()> {
-        if let AugmentedWherePredicate::WherePredicate(WherePredicate::Type(pred)) = self {
-            pred.substitute(context)?;
-        }
-        Ok(())
-    }
-}
-
-impl Substitute for PredicateType {
-    fn substitute(&mut self, context: &mut SubstituteContext) -> syn::Result<()> {
-        self.bounded_ty.substitute(context)?;
-
-        for bound in &mut self.bounds {
+    fn visit_predicate_type_mut(&mut self, i: &mut syn::PredicateType) {
+        let iter = i.bounds.iter().enumerate().filter_map(|(i, bound)| {
             if let TypeParamBound::Trait(bound) = bound {
-                for segment in &mut bound.path.segments {
-                    segment.arguments.substitute(context)?;
+                if bound.path.segments.len() != 1 {
+                    return None;
                 }
+                Some((
+                    i,
+                    self.trait_aliases
+                        .get(&bound.path.segments.first().unwrap().ident)?,
+                ))
+            } else {
+                None
+            }
+        });
+
+        let mut new_bounds = Punctuated::new();
+        let mut to_remove = Vec::new();
+
+        for (index, bounds) in iter {
+            to_remove.push(index);
+            for pair in bounds.pairs() {
+                let (bound, plus) = pair.into_tuple();
+                new_bounds.push_value(bound.clone());
+                new_bounds.push_punct(
+                    plus.copied()
+                        .unwrap_or_else(|| Token![+](Span::call_site())),
+                );
             }
         }
 
-        Ok(())
+        for (i, pair) in i.bounds.pairs().enumerate() {
+            if !to_remove.contains(&i) {
+                let (bound, plus) = pair.into_tuple();
+                new_bounds.push_value(bound.clone());
+                new_bounds.push_punct(
+                    plus.copied()
+                        .unwrap_or_else(|| Token![+](Span::call_site())),
+                );
+            }
+        }
+
+        i.bounds = new_bounds;
+
+        visit_mut::visit_predicate_type_mut(self, i);
     }
 }
 
@@ -158,186 +324,83 @@ fn into_token_tree(tokens: TokenStream) -> Result<TokenTree, TokenStream> {
     }
 }
 
-fn try_substitute_token_tree(
-    token_tree: &TokenTree,
-    context: &mut SubstituteContext,
-) -> Option<TokenStream> {
-    let TokenTree::Group(group) = token_tree else {
-        return None;
-    };
+enum InlineAlias {
+    Type(InlineTypeAlias),
+    Trait(InlineTraitAlias),
+}
 
-    if group.delimiter() != Delimiter::Brace {
-        return None;
-    }
-
-    let Ok(TokenTree::Group(group)) = into_token_tree(group.stream()) else {
-        return None;
-    };
-
-    if group.delimiter() != Delimiter::Brace {
-        return None;
-    }
-
-    let Ok(TokenTree::Ident(ident)) = into_token_tree(group.stream()) else {
-        return None;
-    };
-
-    for (alias, ty) in context.aliases {
-        if alias == &ident {
-            return Some(ty.to_token_stream());
+impl Parse for InlineAlias {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let lookahead = input.lookahead1();
+        if lookahead.peek(Token![type]) {
+            Ok(InlineAlias::Type(input.parse()?))
+        } else if lookahead.peek(Token![trait]) {
+            Ok(InlineAlias::Trait(input.parse()?))
+        } else {
+            Err(lookahead.error())
         }
     }
-
-    None
 }
 
-fn substitute_token_tree(token_tree: TokenTree, context: &mut SubstituteContext) -> TokenStream {
-    try_substitute_token_tree(&token_tree, context).map_or_else(
-        || {
-            if let TokenTree::Group(group) = token_tree {
-                let mut tokens = TokenStream::new();
-                for token_tree in group.stream() {
-                    tokens.extend(substitute_token_tree(token_tree, context));
-                }
-                let mut new_group = Group::new(group.delimiter(), tokens);
-                new_group.set_span(group.span());
-                TokenTree::Group(new_group).into()
-            } else {
-                token_tree.into()
+struct InlineTypeAlias {
+    _type_token: Token![type],
+    ident: Ident,
+    _generics: Generics,
+    _eq_token: Token![=],
+    ty: Type,
+}
+
+impl Parse for InlineTypeAlias {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        Ok(InlineTypeAlias {
+            _type_token: input.parse()?,
+            ident: input.parse()?,
+            _generics: {
+                let mut generics: Generics = input.parse()?;
+                generics.where_clause = input.parse()?;
+                generics
+            },
+            _eq_token: input.parse()?,
+            ty: input.parse()?,
+        })
+    }
+}
+
+struct InlineTraitAlias {
+    _trait_token: Token![trait],
+    ident: Ident,
+    _generics: Generics,
+    _eq_token: Token![=],
+    bounds: Punctuated<TypeParamBound, Token![+]>,
+}
+
+impl Parse for InlineTraitAlias {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let trait_token = input.parse()?;
+        let ident = input.parse()?;
+        let mut generics: Generics = input.parse()?;
+        let eq_token = input.parse()?;
+
+        let mut bounds = Punctuated::new();
+        loop {
+            if input.peek(Token![where]) || input.peek(Token![,]) || input.is_empty() {
+                break;
             }
-        },
-        |stream| stream,
-    )
-}
-
-impl Substitute for Macro {
-    fn substitute(&mut self, context: &mut SubstituteContext) -> syn::Result<()> {
-        let mut new_tokens = TokenStream::new();
-
-        for token_tree in mem::take(&mut self.tokens) {
-            new_tokens.extend(substitute_token_tree(token_tree, context));
+            bounds.push_value(input.parse()?);
+            if input.peek(Token![where]) || input.peek(Token![,]) || input.is_empty() {
+                break;
+            }
+            bounds.push_punct(input.parse()?);
         }
 
-        self.tokens = new_tokens;
+        generics.where_clause = input.parse()?;
 
-        Ok(())
-    }
-}
-
-struct FormatIdent<'a>(&'a Ident);
-
-impl<'a> fmt::Debug for FormatIdent<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&self.0, f)
-    }
-}
-
-struct FormatSlice<'a>(&'a [&'a Ident]);
-
-impl<'a> fmt::Debug for FormatSlice<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_list()
-            .entries(self.0.iter().copied().map(FormatIdent))
-            .finish()
-    }
-}
-
-fn detect_cycle(alias: &Ident, context: &mut SubstituteContext) -> syn::Result<()> {
-    if context.substitution_stack.contains(&alias) {
-        Err(syn::Error::new(
-            alias.span(),
-            "cycle while substituting aliases",
-        ))
-    } else {
-        Ok(())
-    }
-}
-
-impl Substitute for Type {
-    fn substitute(&mut self, context: &mut SubstituteContext) -> syn::Result<()> {
-        match self {
-            Type::Array(TypeArray { elem, .. })
-            | Type::Group(TypeGroup { elem, .. })
-            | Type::Paren(TypeParen { elem, .. })
-            | Type::Ptr(TypePtr { elem, .. })
-            | Type::Reference(TypeReference { elem, .. })
-            | Type::Slice(TypeSlice { elem, .. }) => elem.substitute(context)?,
-            Type::BareFn(TypeBareFn { inputs, output, .. }) => {
-                for arg in inputs {
-                    arg.ty.substitute(context)?;
-                }
-
-                if let ReturnType::Type(_, ty) = output {
-                    ty.substitute(context)?;
-                }
-            }
-            Type::Macro(mac) if context.in_macros => {
-                mac.mac.substitute(context)?;
-            }
-            Type::Path(path) => {
-                if let Some(qself) = &mut path.qself {
-                    qself.ty.substitute(context)?;
-                } else if path.path.segments.len() == 1 {
-                    for (alias, ty) in context.aliases {
-                        if path.path.is_ident(alias) {
-                            detect_cycle(alias, context)?;
-                            context.substitution_stack.push(alias);
-                            let mut ty = ty.clone();
-                            ty.substitute(context)?;
-                            context.substitution_stack.pop();
-                            *self = ty;
-                            return Ok(());
-                        }
-                    }
-                }
-
-                for segment in &mut path.path.segments {
-                    segment.arguments.substitute(context)?;
-                }
-            }
-            Type::Tuple(tuple) => tuple
-                .elems
-                .iter_mut()
-                .try_for_each(|ty| ty.substitute(context))?,
-            Type::ImplTrait(_)
-            | Type::Infer(_)
-            | Type::Macro(_)
-            | Type::Never(_)
-            | Type::TraitObject(_)
-            | Type::Verbatim(_) => {}
-            _ => panic!("unknown type format {self:#?}"),
-        }
-
-        Ok(())
-    }
-}
-
-impl Substitute for PathArguments {
-    fn substitute(&mut self, context: &mut SubstituteContext) -> syn::Result<()> {
-        match self {
-            PathArguments::AngleBracketed(AngleBracketedGenericArguments { args, .. }) => {
-                for arg in args {
-                    match arg {
-                        GenericArgument::AssocType(AssocType { ty, .. })
-                        | GenericArgument::Type(ty) => ty.substitute(context)?,
-                        _ => {}
-                    }
-                }
-            }
-            PathArguments::Parenthesized(ParenthesizedGenericArguments {
-                inputs, output, ..
-            }) => {
-                for input in inputs {
-                    input.substitute(context)?;
-                }
-
-                if let ReturnType::Type(_, ty) = output {
-                    ty.substitute(context)?;
-                }
-            }
-            PathArguments::None => {}
-        }
-
-        Ok(())
+        Ok(InlineTraitAlias {
+            _trait_token: trait_token,
+            ident,
+            _generics: generics,
+            _eq_token: eq_token,
+            bounds,
+        })
     }
 }
