@@ -1,7 +1,8 @@
 //! `local-type-aliases` allows for the creation of scoped type aliases in an
-//!`impl` block.
+//! item.
 //!
 //! ## Examples
+//!
 //! ```rust
 //! # use local_type_alias::local_alias;
 //! #
