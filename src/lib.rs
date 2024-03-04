@@ -1,5 +1,5 @@
-//! `local-type-aliases` allows for the creation of scoped type aliases in an
-//! item.
+//! `local-type-aliases` allows for the creation of scoped type and trait
+//! aliases in an item.
 //!
 //! ## Examples
 //!

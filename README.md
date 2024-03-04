@@ -1,28 +1,31 @@
 # Local type aliases
 
-`local-type-alias` provides an attribute macro for creating scoped type aliases in an `impl` block.
+`local-type-alias` provides an attribute macro for creating scoped type and trait aliases in an item.
 
 ## Examples
 
 ```rust
 #[local_alias]
-impl<T> MyType<T>
+#[alias(type X = i32)]
+struct MyType<T>
 where
-    alias!(X = i32):,
     X: for<'a> Add<&'a T>,
 {
-    // ...
+    value: T,
 }
 ```
 
 ```rust
 #[local_alias]
+#[alias(
+    type X = [T; 4],
+    type Y = *mut X,
+    type Z = fn(X) -> Y,
+    trait A = PartialEq<fn([u8; 4]) -> *mut [u8; 4]>,
+)]
 impl<T> MyType<T>
 where
-    alias!(X = [T; 4]):,
-    alias!(Y = *mut X):,
-    alias!(Z = fn(X) -> Y):,
-    Z: PartialEq<fn([u8; 4]) -> *mut [u8; 4]>,
+    Z: A,
 {
     // ...
 }
