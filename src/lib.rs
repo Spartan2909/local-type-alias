@@ -37,6 +37,23 @@
 //!     // ...
 //! }
 //! ```
+//!
+//! ```rust
+//! # use local_type_alias::local_alias;
+//! #
+//! # macro_rules! my_macro {
+//! #    ($($tt:tt)*) => {
+//! #        $($tt)*
+//! #    };
+//! # }
+//! #
+//! #[local_alias(macros)]
+//! #[alias(type TotallyNotAString = String)]
+//! struct MyType {
+//!    // This expands to `value: my_macro!(String),`
+//!    value: my_macro!({{TotallyNotAString}}),
+//! }
+//! ```
 
 mod substitute;
 

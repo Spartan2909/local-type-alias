@@ -30,3 +30,12 @@ where
     // ...
 }
 ```
+
+```rust
+#[local_alias(macros)]
+#[alias(type TotallyNotAString = String)]
+struct MyType {
+   // This expands to `value: my_macro!(String),`
+   value: my_macro!({{TotallyNotAString}}),
+}
+```
