@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::mem;
 
 use proc_macro2::Delimiter;
@@ -41,6 +42,7 @@ use syn::Token;
 use syn::Type;
 use syn::TypeParamBound;
 
+#[derive(Clone)]
 pub struct Visitor {
     type_aliases: HashMap<Ident, Type>,
     trait_aliases: HashMap<Ident, Punctuated<TypeParamBound, Token![+]>>,
@@ -283,10 +285,10 @@ impl VisitMut for Visitor {
         });
 
         let mut new_bounds = Punctuated::new();
-        let mut to_remove = Vec::new();
+        let mut to_remove = HashSet::with_capacity(i.bounds.len());
 
         for (index, bounds) in iter {
-            to_remove.push(index);
+            to_remove.insert(index);
             for pair in bounds.pairs() {
                 let (bound, plus) = pair.into_tuple();
                 new_bounds.push_value(bound.clone());
@@ -297,18 +299,20 @@ impl VisitMut for Visitor {
             }
         }
 
-        for (i, pair) in i.bounds.pairs().enumerate() {
-            if !to_remove.contains(&i) {
-                let (bound, plus) = pair.into_tuple();
-                new_bounds.push_value(bound.clone());
-                new_bounds.push_punct(
-                    plus.copied()
-                        .unwrap_or_else(|| Token![+](Span::call_site())),
-                );
+        if !to_remove.is_empty() {
+            for (i, pair) in i.bounds.pairs().enumerate() {
+                if !to_remove.contains(&i) {
+                    let (bound, plus) = pair.into_tuple();
+                    new_bounds.push_value(bound.clone());
+                    new_bounds.push_punct(
+                        plus.copied()
+                            .unwrap_or_else(|| Token![+](Span::call_site())),
+                    );
+                }
             }
-        }
 
-        i.bounds = new_bounds;
+            i.bounds = new_bounds;
+        }
 
         visit_mut::visit_predicate_type_mut(self, i);
     }
@@ -345,7 +349,7 @@ impl Parse for InlineAlias {
 struct InlineTypeAlias {
     _type_token: Token![type],
     ident: Ident,
-    _generics: Generics,
+    generics: Generics,
     _eq_token: Token![=],
     ty: Type,
 }
@@ -355,7 +359,7 @@ impl Parse for InlineTypeAlias {
         Ok(InlineTypeAlias {
             _type_token: input.parse()?,
             ident: input.parse()?,
-            _generics: {
+            generics: {
                 let mut generics: Generics = input.parse()?;
                 generics.where_clause = input.parse()?;
                 generics
@@ -369,7 +373,7 @@ impl Parse for InlineTypeAlias {
 struct InlineTraitAlias {
     _trait_token: Token![trait],
     ident: Ident,
-    _generics: Generics,
+    generics: Generics,
     _eq_token: Token![=],
     bounds: Punctuated<TypeParamBound, Token![+]>,
 }
@@ -398,7 +402,7 @@ impl Parse for InlineTraitAlias {
         Ok(InlineTraitAlias {
             _trait_token: trait_token,
             ident,
-            _generics: generics,
+            generics,
             _eq_token: eq_token,
             bounds,
         })
